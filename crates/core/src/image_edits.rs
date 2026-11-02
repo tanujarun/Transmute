@@ -31,6 +31,9 @@ pub enum Shape {
     Highlight { x1: f64, y1: f64, x2: f64, y2: f64 },
     Text { x: f64, y: f64, text: String, color: String, size: u32 },
     Number { x: f64, y: f64, value: u32, color: String, size: u32 },
+    Pen { points: Vec<(f64, f64)>, color: String },
+    Magnifier { x: f64, y: f64, radius: u32, zoom: f64 },
+    Picture { x: f64, y: f64, width: u32, path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -46,8 +49,31 @@ pub struct PageChoice {
 pub enum PhotoEdit {
     CropImage { x: u32, y: u32, width: u32, height: u32 },
     ResizeImage { width: u32, height: u32 },
-    AdjustImage { brightness: i32, contrast: i32, saturation: i32, hue: i32, sharpen: f64, blur: f64, grain: f64 },
-    BackgroundImage { color: String, image: Option<PathBuf>, ratio: f64, padding: u32, radius: u32, shadow: bool },
+    AdjustImage {
+        brightness: i32,
+        contrast: i32,
+        saturation: i32,
+        hue: i32,
+        sharpen: f64,
+        blur: f64,
+        grain: f64,
+        #[serde(default)]
+        dehaze: f64,
+        #[serde(default)]
+        clarity: f64,
+        #[serde(default)]
+        denoise: f64,
+    },
+    BackgroundImage {
+        color: String,
+        image: Option<PathBuf>,
+        ratio: f64,
+        padding: u32,
+        radius: u32,
+        shadow: bool,
+        #[serde(default)]
+        backdrop_blur: f64,
+    },
     RedactImage { regions: Vec<Region> },
     AnnotateImage { shapes: Vec<Shape> },
     OrganizePdf { pages: Vec<PageChoice> },
@@ -159,6 +185,34 @@ fn push_shape(command: &mut Command, shape: &Shape, stroke: u32) -> Result<()> {
             let (dx, dy) = (*size as f64 * 0.28 * value.to_string().len() as f64, *size as f64 * 0.36);
             command.args(["-annotate", &format!("+{:.0}+{:.0}", x - dx, y + dy), &value.to_string()]);
         }
+        Shape::Pen { points, color } => {
+            let color = checked_color(color)?;
+            let path: Vec<String> = points.iter().map(|(x, y)| format!("{x:.1},{y:.1}")).collect();
+            if path.len() >= 2 {
+                command.args(["-stroke", color, "-strokewidth", &line, "-fill", "none"]);
+                command.args(["-draw", &format!("polyline {}", path.join(" "))]);
+            }
+        }
+        Shape::Magnifier { x, y, radius, zoom } => {
+            let side = radius * 2;
+            let source = ((side as f64 / zoom.max(1.0)).round() as u32).max(2);
+            let left = (x - source as f64 / 2.0).max(0.0);
+            let top = (y - source as f64 / 2.0).max(0.0);
+            let center = *radius as f64;
+            let circle = format!("circle {center},{center} {center},0");
+            command.args(["(", "+clone", "-crop", &format!("{source}x{source}+{left:.0}+{top:.0}"), "+repage"]);
+            command.args(["-resize", &format!("{side}x{side}!"), "-alpha", "set"]);
+            command.args(["(", "-size", &format!("{side}x{side}"), "xc:black", "-fill", "white", "-stroke", "none"]);
+            command.args(["-draw", &circle, ")", "-alpha", "off", "-compose", "CopyOpacity", "-composite", ")"]);
+            let at = format!("+{:.0}+{:.0}", x - center, y - center);
+            command.args(["-compose", "Over", "-geometry", &at, "-composite"]);
+            command.args(["-stroke", "white", "-strokewidth", &line, "-fill", "none"]);
+            command.args(["-draw", &format!("circle {x:.1},{y:.1} {:.1},{y:.1}", x + center)]);
+        }
+        Shape::Picture { x, y, width, path } => {
+            command.args(["("]).arg(input(path)).args(["-resize", &format!("{width}x"), ")"]);
+            command.args(["-geometry", &format!("+{x:.0}+{y:.0}"), "-composite"]);
+        }
     }
     Ok(())
 }
@@ -181,7 +235,7 @@ fn run_background(
     tools: &Tools,
     src: &Path,
     out: &Path,
-    (color, image, ratio, padding, radius, shadow): (&str, &Option<PathBuf>, f64, u32, u32, bool),
+    (color, image, ratio, padding, radius, shadow, backdrop_blur): (&str, &Option<PathBuf>, f64, u32, u32, bool, f64),
 ) -> Result<()> {
     let (width, height) = image_size(tools, src)?;
     let (canvas_width, canvas_height) = background_canvas(width, height, ratio, padding);
@@ -191,6 +245,9 @@ fn run_background(
         Some(backdrop) => {
             command.arg(input(backdrop)).args(["-resize", &format!("{size}^")]);
             command.args(["-gravity", "center", "-extent", &size]);
+            if backdrop_blur > 0.0 {
+                command.args(["-blur", &format!("0x{backdrop_blur}")]);
+            }
         }
         None => {
             command.args(["-size", &size]).arg(format!("xc:{}", checked_color(color)?));
@@ -258,10 +315,23 @@ pub fn apply(tools: &Tools, src: &Path, edit: &PhotoEdit) -> Result<PathBuf> {
             command.args(["-resize", &format!("{width}x{height}!")]);
             "resized"
         }
-        PhotoEdit::AdjustImage { brightness, contrast, saturation, hue, sharpen, blur, grain } => {
+        PhotoEdit::AdjustImage { brightness, contrast, saturation, hue, sharpen, blur, grain, dehaze, clarity, denoise } => {
+            if *denoise > 0.0 {
+                command.args(["-wavelet-denoise", &format!("{denoise}%")]);
+            }
             let modulate = format!("{},{},{}", 100 + brightness, 100 + saturation, 100 + hue * 100 / 180);
             command.args(["-modulate", &modulate]);
             command.args(["-brightness-contrast", &format!("0x{contrast}")]);
+            if *dehaze > 0.0 {
+                // Haze lifts the shadows and lowers saturation, so stretch the range and restore colour.
+                let stretch = dehaze * 0.15;
+                command.args(["-contrast-stretch", &format!("{stretch}%x{stretch}%")]);
+                command.args(["-modulate", &format!("100,{},100", 100.0 + dehaze * 0.3)]);
+            }
+            if *clarity > 0.0 {
+                // A wide unsharp mask raises local contrast rather than fine detail.
+                command.args(["-unsharp", &format!("0x30+{}+0", clarity / 100.0)]);
+            }
             if *blur > 0.0 {
                 command.args(["-blur", &format!("0x{blur}")]);
             }
@@ -273,8 +343,8 @@ pub fn apply(tools: &Tools, src: &Path, edit: &PhotoEdit) -> Result<PathBuf> {
             }
             "edited"
         }
-        PhotoEdit::BackgroundImage { color, image, ratio, padding, radius, shadow } => {
-            run_background(tools, src, &out, (color, image, *ratio, *padding, *radius, *shadow))?;
+        PhotoEdit::BackgroundImage { color, image, ratio, padding, radius, shadow, backdrop_blur } => {
+            run_background(tools, src, &out, (color, image, *ratio, *padding, *radius, *shadow, *backdrop_blur))?;
             "background"
         }
         PhotoEdit::RedactImage { regions } => {
@@ -292,6 +362,8 @@ pub fn apply(tools: &Tools, src: &Path, edit: &PhotoEdit) -> Result<PathBuf> {
             }
             let (width, height) = image_size(tools, src)?;
             let stroke = (width.max(height) / 300).max(2);
+            // A greyscale photo would otherwise turn coloured pictures grey.
+            command.args(["-colorspace", "sRGB"]);
             for shape in shapes {
                 push_shape(&mut command, shape, stroke)?;
             }
@@ -311,10 +383,20 @@ pub fn apply(tools: &Tools, src: &Path, edit: &PhotoEdit) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Optional finishing for a collage.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CollageStyle {
+    /// Corner radius of each image in pixels.
+    pub corners: u32,
+    /// Final width in pixels, or 0 to keep the natural size.
+    pub width: u32,
+}
+
 /// Lays several images out in one picture. `layout` is grid, row, column or featured.
 /// Rows and columns keep each image's shape; grids and the featured layout crop to
 /// fill their cells, so nothing floats in a band of background.
-pub fn collage(tools: &Tools, paths: &[PathBuf], layout: &str, spacing: u32, background: &str) -> Result<PathBuf> {
+pub fn collage(tools: &Tools, paths: &[PathBuf], layout: &str, spacing: u32, background: &str, style: &CollageStyle) -> Result<PathBuf> {
     const CELL: u32 = 800;
     let first = paths.first().ok_or_else(|| anyhow!("nothing selected"))?;
     let dir = first.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -337,7 +419,27 @@ pub fn collage(tools: &Tools, paths: &[PathBuf], layout: &str, spacing: u32, bac
             .arg(&cell))?;
         Ok(cell)
     };
+    // Rounds a cell by flattening its corners onto the background colour.
+    let round = |cell: &Path| -> Result<()> {
+        if style.corners == 0 {
+            return Ok(());
+        }
+        let (width, height) = image_size(tools, cell)?;
+        let shape = format!("roundrectangle 0,0 {},{} {r},{r}", width - 1, height - 1, r = style.corners);
+        let mut command = hidden(tools.magick()?);
+        command.arg(cell).args(["-alpha", "set"]);
+        command.args(["(", "-size", &format!("{width}x{height}"), "xc:black", "-fill", "white", "-stroke", "none"]);
+        command.args(["-draw", &shape, ")", "-alpha", "off", "-compose", "CopyOpacity", "-composite"]);
+        command.args(["-compose", "Over", "-background", color, "-flatten"]).arg(cell);
+        run(&mut command)?;
+        Ok(())
+    };
     let joined = |cells: &[PathBuf], direction: &str, target: &Path| -> Result<()> {
+        for cell in cells {
+            if cell.file_name().is_some_and(|name| name.to_string_lossy().contains("cell") || name.to_string_lossy().contains("side") || name == "main.png") {
+                round(cell)?;
+            }
+        }
         run(hidden(tools.magick()?)
             .args(cells)
             .args(["-background", color, "-gravity", "center", direction, &gap])
@@ -393,6 +495,9 @@ pub fn collage(tools: &Tools, paths: &[PathBuf], layout: &str, spacing: u32, bac
         }
     }
     border(&inner)?;
+    if style.width > 0 {
+        run(hidden(tools.magick()?).arg(&out).args(["-resize", &format!("{}x", style.width)]).arg(&out))?;
+    }
     let stem = first.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let path = unique_path(dir, &format!("{stem} collage"), "png");
     std::fs::rename(&out, &path)?;

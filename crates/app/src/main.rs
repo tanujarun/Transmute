@@ -93,6 +93,8 @@ fn main() {
             settings::settings_get,
             settings::settings_set,
             editor::editor_detect,
+            editor::editor_loudness,
+            editor::editor_solo,
             editor::editor_info,
             editor::editor_apply,
             editor::editor_pick_image,

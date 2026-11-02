@@ -83,6 +83,7 @@ const EDITOR_TOOLS: &[&str] = &[
     "trim-audio", "channels", "bleep", "visualize",
     "edit-image", "annotate", "background", "crop-image", "resize-image", "redact-image",
     "organize", "collage", "compress-to", "normalize", "metadata",
+    "merge-pdf", "make-pdf", "join",
 ];
 
 /// Editors that can apply one set of choices to a whole selection.
@@ -506,7 +507,8 @@ mod tests {
         assert!(!ids(&["a.jpg", "b.png"]).contains(&"annotate"));
         assert!(ids(&["a.jpg"]).contains(&"metadata") && !ids(&["a.jpg"]).contains(&"strip"));
         assert!(ids(&["a.jpg", "b.jpg"]).contains(&"strip"), "selections can still remove metadata");
-        assert!(ids(&["a.pdf"]).contains(&"strip") && ids(&["a.pdf"]).contains(&"pdfa"));
+        assert!(ids(&["a.pdf"]).contains(&"metadata") && ids(&["a.pdf"]).contains(&"pdfa"));
+        assert!(ids(&["a.pdf", "b.pdf"]).contains(&"strip"), "PDF selections can still remove metadata");
         assert!(ids(&["a.mp4"]).contains(&"mute"));
         assert!(!ids(&["a.mp3"]).contains(&"mute"));
         assert!(ids(&["a.pdf", "b.pdf"]).contains(&"merge-pdf"));

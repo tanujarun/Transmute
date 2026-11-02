@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use transmute_core::edits::{apply, frame_at, waveform, Edit};
-use transmute_core::extras::{compress_to, read_metadata, read_qr, write_metadata, CompressPlan, Field};
+use transmute_core::extras::{compress_to, measure_loudness, read_metadata, read_qr, write_metadata, CompressPlan, Field};
 use transmute_core::filetools::run_tool;
 use transmute_core::image_edits::image_size;
 use transmute_core::tools::{hidden, run};
@@ -198,6 +198,37 @@ fn extras_do_what_they_say() {
     assert!(bytes.windows(10).any(|w| w == b"pdfaid:par"), "declares PDF/A");
     let info = run(hidden(t.poppler("pdftotext.exe").unwrap()).arg(&archival).arg("-")).unwrap();
     assert!(String::from_utf8_lossy(&info).contains("Heading"), "text survives");
+
+    // PDF metadata, including non-ASCII text, read back by pdfinfo.
+    let info_fields = set(&[("Title", "Bridge Report"), ("Author", "Zoë Müller"), ("Subject", "Tests"), ("Keywords", "a, b")]);
+    let tagged_pdf = write_metadata(&t, &pdf, &info_fields, &mut |_| {}).unwrap();
+    let read = read_metadata(&t, &tagged_pdf).unwrap();
+    for name in ["Title", "Author", "Subject", "Keywords"] {
+        assert_eq!(field(&read, name), field(&info_fields, name), "{name}");
+    }
+    assert!(String::from_utf8_lossy(&run(hidden(t.poppler("pdftotext.exe").unwrap()).arg(&tagged_pdf).arg("-")).unwrap()).contains("Heading"), "content kept");
+    let cleared = tool("strip", &tagged_pdf);
+    assert_eq!(field(&read_metadata(&t, &cleared).unwrap(), "Author"), "", "PDF metadata can be removed");
+
+    // The loudness report describes a quiet input and a predicted output near target.
+    let levels = measure_loudness(&t, &quiet, -16.0, -1.5, 11.0).unwrap();
+    assert!(levels.input_loudness < -25.0, "input is quiet: {levels:?}");
+    assert!((levels.output_loudness + 16.0).abs() < 3.0, "output near target: {levels:?}");
+
+    // Soloing a channel: left has tone, right is silent.
+    let one_side = dir.join("side.wav");
+    run(hidden(t.ffmpeg().unwrap())
+        .args(["-y", "-f", "lavfi", "-i", "aevalsrc='0.5*sin(2*PI*440*t)|0':s=44100:d=2"])
+        .arg(&one_side))
+    .unwrap();
+    let peak = |path: &Path| -> f64 {
+        let out = hidden(tools().ffmpeg().unwrap()).args(["-hide_banner", "-i"]).arg(path).args(["-af", "volumedetect", "-f", "null", "-"]).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        text.lines().find(|l| l.contains("max_volume:")).unwrap().split("max_volume:").nth(1).unwrap().trim().trim_end_matches(" dB").parse().unwrap()
+    };
+    let cache = dir.join("cache");
+    assert!(peak(&transmute_core::edits::solo_channel(&t, &one_side, false, &cache).unwrap()) > -12.0, "left solo has sound");
+    assert!(peak(&transmute_core::edits::solo_channel(&t, &one_side, true, &cache).unwrap()) < -60.0, "right solo is silent");
 
     let book = tool("epub-pages", &pdf);
     let listing = run(hidden(t.seven_zip().unwrap()).args(["l", "-ba"]).arg(&book)).unwrap();

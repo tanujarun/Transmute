@@ -357,6 +357,20 @@ pub fn waveform(tools: &Tools, src: &Path, cache: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// One channel of a recording on both speakers, for previewing it alone.
+pub fn solo_channel(tools: &Tools, src: &Path, right: bool, cache: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(cache)?;
+    let side = if right { 1 } else { 0 };
+    let out = cache.join(format!("solo-{side}-{}.m4a", std::process::id()));
+    let filter = format!("aformat=channel_layouts=stereo,pan=stereo|c0=c{side}|c1=c{side}");
+    run(hidden(tools.ffmpeg()?)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(src)
+        .args(["-vn", "-af", &filter, "-c:a", "aac", "-b:a", "160k"])
+        .arg(&out))?;
+    Ok(out)
+}
+
 /// One frame as an image, for detecting what to redact in a video.
 pub fn frame_at(tools: &Tools, src: &Path, seconds: f64, out: &Path) -> Result<()> {
     run(hidden(tools.ffmpeg()?)

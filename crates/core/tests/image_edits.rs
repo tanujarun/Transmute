@@ -3,7 +3,7 @@
 //!   cargo test -p transmute-core --release --test image_edits -- --ignored --nocapture
 
 use std::path::{Path, PathBuf};
-use transmute_core::image_edits::{apply, collage, image_size, pdf_thumbnails, PageChoice, PhotoEdit, Region, Shape};
+use transmute_core::image_edits::{apply, collage, image_size, pdf_thumbnails, CollageStyle, PageChoice, PhotoEdit, Region, Shape};
 use transmute_core::tools::{hidden, run};
 use transmute_core::Tools;
 
@@ -61,16 +61,37 @@ fn every_photo_and_pdf_edit_does_what_it_says() {
     // Half brightness on a mid-grey must darken it.
     let grey = dir.join("grey.png");
     run(hidden(t.magick().unwrap()).args(["-size", "100x100", "xc:#808080"]).arg(&grey)).unwrap();
-    let adjust = PhotoEdit::AdjustImage { brightness: -50, contrast: 0, saturation: 0, hue: 0, sharpen: 0.0, blur: 0.0, grain: 0.0 };
+    let adjust = PhotoEdit::AdjustImage { brightness: -50, contrast: 0, saturation: 0, hue: 0, sharpen: 0.0, blur: 0.0, grain: 0.0, dehaze: 0.0, clarity: 0.0, denoise: 0.0 };
     let darker = edit(&grey, adjust);
     assert!(color_at(&darker, "100x100+0+0").0 < 90.0, "brightness lowered");
-    let grainy = PhotoEdit::AdjustImage { brightness: 0, contrast: 10, saturation: 20, hue: 10, sharpen: 1.0, blur: 1.0, grain: 0.5 };
+    let grainy = PhotoEdit::AdjustImage { brightness: 0, contrast: 10, saturation: 20, hue: 10, sharpen: 1.0, blur: 1.0, grain: 0.5, dehaze: 0.0, clarity: 0.0, denoise: 0.0 };
     assert!(edit(&grey, grainy).is_file());
+
+    // Measured by the standard deviation of the pixels: noise reduction lowers it,
+    // dehaze and clarity raise it.
+    let spread = |image: &Path| -> f64 {
+        let out = run(hidden(tools().magick().unwrap()).arg(image).args(["-format", "%[fx:standard_deviation]", "info:"])).unwrap();
+        String::from_utf8_lossy(&out).trim().parse().unwrap()
+    };
+    let plain = PhotoEdit::AdjustImage { brightness: 0, contrast: 0, saturation: 0, hue: 0, sharpen: 0.0, blur: 0.0, grain: 0.0, dehaze: 0.0, clarity: 0.0, denoise: 0.0 };
+    let noisy = dir.join("noisy.png");
+    run(hidden(t.magick().unwrap()).args(["-size", "300x200", "xc:gray50", "-attenuate", "0.6", "+noise", "Gaussian"]).arg(&noisy)).unwrap();
+    let PhotoEdit::AdjustImage { .. } = plain else { unreachable!() };
+    let with = |dehaze: f64, clarity: f64, denoise: f64| PhotoEdit::AdjustImage {
+        brightness: 0, contrast: 0, saturation: 0, hue: 0, sharpen: 0.0, blur: 0.0, grain: 0.0, dehaze, clarity, denoise,
+    };
+    assert!(spread(&edit(&noisy, with(0.0, 0.0, 15.0))) < spread(&noisy) * 0.7, "noise reduction works");
+    let hazy = dir.join("hazy.png");
+    run(hidden(t.magick().unwrap()).args(["-size", "300x200", "gradient:#808080-#b0b0b0"]).arg(&hazy)).unwrap();
+    assert!(spread(&edit(&hazy, with(60.0, 0.0, 0.0))) > spread(&hazy) * 1.5, "dehaze restores contrast");
+    let soft = dir.join("soft.png");
+    run(hidden(t.magick().unwrap()).args(["-size", "300x200", "plasma:", "-blur", "0x4"]).arg(&soft)).unwrap();
+    assert!(spread(&edit(&soft, with(0.0, 80.0, 0.0))) > spread(&soft) * 1.02, "clarity adds local contrast");
 
     // A red canvas, padding 50, image centred, corners rounded.
     let framed = edit(
         &white,
-        PhotoEdit::BackgroundImage { color: "#ff0000".into(), image: None, ratio: 0.0, padding: 50, radius: 20, shadow: false },
+        PhotoEdit::BackgroundImage { color: "#ff0000".into(), image: None, ratio: 0.0, padding: 50, radius: 20, shadow: false, backdrop_blur: 0.0 },
     );
     assert_eq!(image_size(&t, &framed).unwrap(), (500, 400));
     assert!(color_at(&framed, "10x10+5+5").0 > 240.0 && color_at(&framed, "10x10+5+5").1 < 15.0, "canvas is red");
@@ -78,12 +99,12 @@ fn every_photo_and_pdf_edit_does_what_it_says() {
     assert!(color_at(&framed, "3x3+50+50").1 < 100.0, "corner is rounded away");
     let wide = edit(
         &white,
-        PhotoEdit::BackgroundImage { color: "#000000".into(), image: None, ratio: 2.0, padding: 0, radius: 0, shadow: true },
+        PhotoEdit::BackgroundImage { color: "#000000".into(), image: None, ratio: 2.0, padding: 0, radius: 0, shadow: true, backdrop_blur: 0.0 },
     );
     assert_eq!(image_size(&t, &wide).unwrap(), (600, 300));
     let backdrop = edit(
         &white,
-        PhotoEdit::BackgroundImage { color: "#000000".into(), image: Some(grey.clone()), ratio: 0.0, padding: 40, radius: 0, shadow: false },
+        PhotoEdit::BackgroundImage { color: "#000000".into(), image: Some(grey.clone()), ratio: 0.0, padding: 40, radius: 0, shadow: false, backdrop_blur: 3.0 },
     );
     assert!((color_at(&backdrop, "10x10+5+5").0 - 128.0).abs() < 12.0, "background image is used");
 
@@ -114,8 +135,23 @@ fn every_photo_and_pdf_edit_does_what_it_says() {
         Shape::Highlight { x1: 20.0, y1: 200.0, x2: 120.0, y2: 240.0 },
         Shape::Text { x: 150.0, y: 240.0, text: "Hi \"there\" %w \\n".into(), color: "#000000".into(), size: 24 },
         Shape::Number { x: 350.0, y: 250.0, value: 7, color: "#ff0000".into(), size: 24 },
+        Shape::Pen { points: vec![(320.0, 30.0), (380.0, 30.0), (380.0, 90.0)], color: "#ff00ff".into() },
     ];
     let marked = edit(&white, PhotoEdit::AnnotateImage { shapes });
+    let (r, g, b) = color_at(&marked, "8x1+350+30");
+    assert!(r > 200.0 && g < 60.0 && b > 200.0, "pen line drawn: {r},{g},{b}");
+
+    // Magnifier: a red dot grows to fill the lens, and a picture lands where placed.
+    let dotted = dir.join("dotted.png");
+    run(hidden(t.magick().unwrap()).args(["-size", "400x300", "xc:white", "-fill", "red", "-draw", "circle 100,100 100,110"]).arg(&dotted)).unwrap();
+    let lens = edit(&dotted, PhotoEdit::AnnotateImage { shapes: vec![Shape::Magnifier { x: 100.0, y: 100.0, radius: 60, zoom: 3.0 }] });
+    assert!(color_at(&lens, "4x4+128+98").1 < 60.0, "dot is enlarged past its old edge");
+    assert!(color_at(&lens, "4x4+300+250").1 > 245.0, "outside the lens untouched");
+    let sticker = dir.join("sticker.png");
+    run(hidden(t.magick().unwrap()).args(["-size", "50x50", "xc:#0000ff"]).arg(&sticker)).unwrap();
+    let placed = edit(&white, PhotoEdit::AnnotateImage { shapes: vec![Shape::Picture { x: 200.0, y: 100.0, width: 100, path: sticker }] });
+    assert!(color_at(&placed, "10x10+240+140").2 > 240.0 && color_at(&placed, "10x10+240+140").0 < 15.0, "picture placed and scaled");
+    assert!(color_at(&placed, "10x10+100+50").0 > 245.0, "rest untouched");
     let (r, g, _) = color_at(&marked, "2x2+60+20");
     assert!(r > 200.0 && g < 60.0, "box outline is red: {r},{g}");
     assert!(color_at(&marked, "8x1+220+150").2 > 180.0 && color_at(&marked, "8x1+220+150").0 < 80.0, "arrow is blue");
@@ -171,7 +207,7 @@ fn every_photo_and_pdf_edit_does_what_it_says() {
         })
         .collect();
     for layout in ["grid", "row", "column", "featured"] {
-        let made = collage(&t, &parts, layout, 8, "#102030").unwrap();
+        let made = collage(&t, &parts, layout, 8, "#102030", &CollageStyle::default()).unwrap();
         let (width, height) = image_size(&t, &made).unwrap();
         println!("{layout}: {width}x{height}");
         match layout {
@@ -183,6 +219,11 @@ fn every_photo_and_pdf_edit_does_what_it_says() {
         }
         assert!(color_at(&made, "3x3+1+1").2 > 40.0, "{layout}: border uses the background colour");
     }
+
+    let finished = collage(&t, &parts, "grid", 8, "#102030", &CollageStyle { corners: 60, width: 1000 }).unwrap();
+    assert_eq!(image_size(&t, &finished).unwrap(), (1000, 1000), "final width");
+    let (_, _, corner) = color_at(&finished, "3x3+6+6");
+    assert!(corner > 40.0, "rounded corner shows the background: {corner}");
 
     assert_eq!(std::fs::read(&white).unwrap(), original, "original changed");
 

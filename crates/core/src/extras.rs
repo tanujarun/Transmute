@@ -216,6 +216,78 @@ const IMAGE_FIELDS: &[(&str, &str)] = &[
     ("Longitude", "GPSLongitude"),
 ];
 
+const PDF_FIELDS: &[&str] = &["Title", "Author", "Subject", "Keywords"];
+
+fn pdf_string(value: &str) -> String {
+    let units: Vec<String> = value.encode_utf16().map(|unit| format!("{unit:04X}")).collect();
+    format!("<FEFF{}>", units.concat())
+}
+
+fn trailer_number(trailer: &str, key: &str) -> Option<u32> {
+    let at = trailer.find(key)? + key.len();
+    trailer[at..].split_whitespace().next()?.trim_end_matches('/').parse().ok()
+}
+
+/// Appends a new Info dictionary to a PDF as an incremental update. The input must
+/// use a classic cross-reference table, which `qpdf --object-streams=disable` gives.
+fn append_info(pdf: &[u8], fields: &[Field]) -> Result<Vec<u8>> {
+    let find_last = |needle: &[u8]| pdf.windows(needle.len()).rposition(|window| window == needle);
+    let trailer_at = find_last(b"trailer").ok_or_else(|| anyhow!("this PDF has no plain trailer"))?;
+    let start_at = find_last(b"startxref").ok_or_else(|| anyhow!("this PDF has no startxref"))?;
+    let trailer = String::from_utf8_lossy(&pdf[trailer_at..start_at]).into_owned();
+    let prev: u64 = String::from_utf8_lossy(&pdf[start_at + 9..])
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| anyhow!("unreadable startxref"))?;
+    let size = trailer_number(&trailer, "/Size").ok_or_else(|| anyhow!("this PDF has no /Size"))?;
+    let root = trailer_number(&trailer, "/Root").ok_or_else(|| anyhow!("this PDF has no /Root"))?;
+
+    let entries: Vec<String> = fields
+        .iter()
+        .filter(|field| PDF_FIELDS.contains(&field.name.as_str()) && !field.value.is_empty())
+        .map(|field| format!("/{} {}", field.name, pdf_string(&field.value)))
+        .collect();
+    let mut out = pdf.to_vec();
+    if !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    let object_at = out.len();
+    out.extend(format!("{size} 0 obj\n<< {} >>\nendobj\n", entries.join(" ")).into_bytes());
+    let xref_at = out.len();
+    out.extend(
+        format!(
+            "xref\n{size} 1\n{object_at:010} 00000 n \ntrailer\n<< /Size {} /Root {root} 0 R /Info {size} 0 R /Prev {prev} >>\nstartxref\n{xref_at}\n%%EOF\n",
+            size + 1
+        )
+        .into_bytes(),
+    );
+    Ok(out)
+}
+
+fn read_pdf_metadata(tools: &Tools, src: &Path) -> Result<Vec<Field>> {
+    let info = run(hidden(tools.poppler("pdfinfo.exe")?).args(["-enc", "UTF-8"]).arg(src))?;
+    let text = String::from_utf8_lossy(&info).into_owned();
+    Ok(PDF_FIELDS
+        .iter()
+        .map(|name| {
+            let prefix = format!("{name}:");
+            let value = text.lines().find_map(|line| line.strip_prefix(prefix.as_str())).unwrap_or("").trim();
+            Field { name: name.to_string(), value: value.to_string() }
+        })
+        .collect())
+}
+
+fn write_pdf_metadata(tools: &Tools, src: &Path, fields: &[Field], out: &Path, work: &Path) -> Result<()> {
+    let plain = work.join("plain.pdf");
+    run(hidden(tools.qpdf()?).args(["--object-streams=disable"]).arg(src).arg(&plain))?;
+    let patched = work.join("patched.pdf");
+    std::fs::write(&patched, append_info(&std::fs::read(&plain)?, fields)?)?;
+    // XMP would otherwise contradict the new values. Rewriting also proves the file parses.
+    run(hidden(tools.qpdf()?).args(["--remove-metadata"]).arg(&patched).arg(out))?;
+    Ok(())
+}
+
 fn is_image(ext: &str) -> bool {
     matches!(ext, "jpg" | "png" | "webp" | "tiff")
 }
@@ -223,7 +295,45 @@ fn is_image(ext: &str) -> bool {
 /// Whether the metadata editor can write this file.
 pub fn metadata_editable(path: &Path) -> bool {
     let ext = extension_of(path).unwrap_or_default();
-    is_image(&ext) || matches!(kind_of(&ext), Some(Kind::Video) | Some(Kind::Audio))
+    is_image(&ext) || matches!(kind_of(&ext), Some(Kind::Video) | Some(Kind::Audio) | Some(Kind::Pdf))
+}
+
+/// Levels from FFmpeg's loudness filter, in LUFS, dB and LU.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Loudness {
+    pub input_loudness: f64,
+    pub input_peak: f64,
+    pub input_range: f64,
+    pub output_loudness: f64,
+    pub output_peak: f64,
+}
+
+fn json_number(report: &str, key: &str) -> Option<f64> {
+    let at = report.find(&format!("\"{key}\""))? + key.len() + 2;
+    let rest = report[at..].split_once('"')?.1;
+    rest.split('"').next()?.trim().parse().ok()
+}
+
+/// Measures a recording and predicts its levels after normalizing to these targets.
+pub fn measure_loudness(tools: &Tools, src: &Path, loudness: f64, peak: f64, range: f64) -> Result<Loudness> {
+    let filter = format!("loudnorm=I={loudness}:TP={peak}:LRA={range}:print_format=json");
+    let output = hidden(tools.ffmpeg()?)
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(src)
+        .args(["-vn", "-af", &filter, "-f", "null", "-"])
+        .output()?;
+    let report = String::from_utf8_lossy(&output.stderr).into_owned();
+    let start = report.rfind('{').ok_or_else(|| anyhow!("no loudness report"))?;
+    let report = &report[start..];
+    let value = |key: &str| json_number(report, key).ok_or_else(|| anyhow!("no {key} in the report"));
+    Ok(Loudness {
+        input_loudness: value("input_i")?,
+        input_peak: value("input_tp")?,
+        input_range: value("input_lra")?,
+        output_loudness: value("output_i")?,
+        output_peak: value("output_tp")?,
+    })
 }
 
 /// Parses EXIF's "51/1, 30/1, 2400/100" into decimal degrees.
@@ -253,6 +363,9 @@ fn degrees_to_rationals(value: f64) -> Vec<uR64> {
 /// Current metadata for the editor.
 pub fn read_metadata(tools: &Tools, src: &Path) -> Result<Vec<Field>> {
     let ext = extension_of(src).unwrap_or_default();
+    if ext == "pdf" {
+        return read_pdf_metadata(tools, src);
+    }
     if is_image(&ext) {
         let exif = |tag: &str| -> String {
             run(hidden(tools.magick().unwrap_or_default()).args(["identify", "-format", &format!("%[EXIF:{tag}]")]).arg(input(src)))
@@ -328,7 +441,9 @@ pub fn write_metadata(tools: &Tools, src: &Path, fields: &[Field], progress: &mu
     let dir = src.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let work = tempfile::Builder::new().prefix(".transmute-").tempdir_in(dir)?;
     let out = work.path().join(format!("output.{ext}"));
-    if is_image(&ext) {
+    if ext == "pdf" {
+        write_pdf_metadata(tools, src, fields, &out, work.path())?;
+    } else if is_image(&ext) {
         std::fs::copy(src, &out)?;
         set_image_tags(&out, fields)?;
     } else {

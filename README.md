@@ -71,5 +71,5 @@ The tray menu opens Settings: the wheel's trigger key (Alt, Right Alt, Ctrl or S
 
 - AirDrop is the Windows share panel.
 - Apple Pages is not supported.
-- Metadata can be read and written for JPG, PNG, WebP, TIFF, video and audio. PDFs and other images can only have it removed.
+- Metadata can be read and written for JPG, PNG, WebP, TIFF, PDF, video and audio. Other images can only have it removed.
 - There is no paywall or file limit.

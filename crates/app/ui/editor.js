@@ -30,15 +30,120 @@ function setFromPlayhead(button, input) {
   $(button).onclick = () => { $(input).value = fmt(player.currentTime); };
 }
 
+const clamp = (number, low, high) => Math.min(Math.max(number, low), high);
+
+/// Follows a mouse drag from `event`, reporting movement in screen pixels.
+function trackDrag(event, onMove) {
+  event.preventDefault();
+  event.stopPropagation();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const move = change => onMove(change.clientX - startX, change.clientY - startY);
+  const stop = () => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', stop);
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', stop);
+}
+
+/// Start and end handles over the timeline. Dragging between them moves the whole
+/// range and keeps its length. Stays in step with the number boxes.
 function rangeRow() {
   row(`${numberInput('start', 'Start', 0)}<button id="setStart">Use playhead</button>
        ${numberInput('end', 'End', fmt(info.duration))}<button id="setEnd">Use playhead</button>`);
   setFromPlayhead('setStart', 'start');
   setFromPlayhead('setEnd', 'end');
+  const bar = document.createElement('div');
+  bar.id = 'rangeBar';
+  bar.innerHTML = '<div id="rangeFill"></div><div class="handle" id="handleStart"></div><div class="handle" id="handleEnd"></div>';
+  panel.prepend(bar);
+  const percent = seconds => `${seconds / info.duration * 100}%`;
+  const paint = () => {
+    $('handleStart').style.left = percent(value('start'));
+    $('handleEnd').style.left = percent(value('end'));
+    $('rangeFill').style.left = percent(value('start'));
+    $('rangeFill').style.width = percent(value('end') - value('start'));
+  };
+  const seconds = pixels => pixels / bar.clientWidth * info.duration;
+  const seek = time => { if (player) player.currentTime = time; };
+  $('handleStart').onmousedown = event => {
+    const from = value('start');
+    trackDrag(event, dx => {
+      const time = clamp(from + seconds(dx), 0, value('end') - FRAME);
+      $('start').value = fmt(time);
+      seek(time);
+      paint();
+    });
+  };
+  $('handleEnd').onmousedown = event => {
+    const from = value('end');
+    trackDrag(event, dx => {
+      const time = clamp(from + seconds(dx), value('start') + FRAME, info.duration);
+      $('end').value = fmt(time);
+      seek(time);
+      paint();
+    });
+  };
+  $('rangeFill').onmousedown = event => {
+    const from = value('start');
+    const length = value('end') - from;
+    trackDrag(event, dx => {
+      const time = clamp(from + seconds(dx), 0, info.duration - length);
+      $('start').value = fmt(time);
+      $('end').value = fmt(time + length);
+      seek(time);
+      paint();
+    });
+  };
+  ['start', 'end'].forEach(id => { $(id).addEventListener('input', paint); });
+  ['setStart', 'setEnd'].forEach(id => { $(id).addEventListener('click', paint); });
+  paint();
+  return paint;
 }
 
-/// A list with add and remove, kept in `items`.
-function listRow(items, describe) {
+function placeBox(box, area) {
+  box.style.left = `${area.x / info.width * 100}%`;
+  box.style.top = `${area.y / info.height * 100}%`;
+  box.style.width = `${area.width / info.width * 100}%`;
+  box.style.height = `${area.height / info.height * 100}%`;
+}
+
+/// A box over the preview that drags to move and resizes from its corner grip.
+/// `area` is in source pixels and is updated in place.
+function movableBox(area, onChange) {
+  const box = document.createElement('div');
+  box.className = 'box';
+  const grip = document.createElement('div');
+  grip.className = 'grip';
+  box.append(grip);
+  overlay.append(box);
+  placeBox(box, area);
+  const scale = () => info.width / overlay.getBoundingClientRect().width;
+  box.onmousedown = event => {
+    const { x, y } = area;
+    trackDrag(event, (dx, dy) => {
+      area.x = clamp(Math.round(x + dx * scale()), 0, info.width - area.width);
+      area.y = clamp(Math.round(y + dy * scale()), 0, info.height - area.height);
+      placeBox(box, area);
+      onChange();
+    });
+  };
+  grip.onmousedown = event => {
+    const { width, height } = area;
+    trackDrag(event, (dx, dy) => {
+      area.width = clamp(Math.round(width + dx * scale()), 4, info.width - area.x);
+      area.height = clamp(Math.round(height + dy * scale()), 4, info.height - area.y);
+      placeBox(box, area);
+      onChange();
+    });
+  };
+  return box;
+}
+
+/// A list with remove, kept in `items`. `onRemove` cleans up after an item, and
+/// `onEdit` adds an Edit button that takes the item back out for changes.
+function listRow(items, describe, onRemove, onEdit) {
   const list = document.createElement('ul');
   panel.append(list);
   const render = () => {
@@ -47,7 +152,21 @@ function listRow(items, describe) {
       line.textContent = `${describe(item)} `;
       const remove = document.createElement('button');
       remove.textContent = 'Remove';
-      remove.onclick = () => { items.splice(index, 1); render(); };
+      remove.onclick = () => {
+        items.splice(index, 1);
+        if (onRemove) onRemove(item);
+        render();
+      };
+      if (onEdit) {
+        const edit = document.createElement('button');
+        edit.textContent = 'Edit';
+        edit.onclick = () => {
+          items.splice(index, 1);
+          onEdit(item);
+          render();
+        };
+        line.append(edit);
+      }
       line.append(remove);
       return line;
     }));
@@ -129,12 +248,16 @@ function cropPanel(tool) {
       $('h').value = Math.round(width / ratio);
     };
   });
-  drawRectangles((rectangle, box) => {
-    [...overlay.children].filter(child => child !== box).forEach(child => child.remove());
-    $('x').value = rectangle.x;
-    $('y').value = rectangle.y;
-    $('w').value = rectangle.width;
-    $('h').value = rectangle.height;
+  const fill = area => {
+    $('x').value = area.x;
+    $('y').value = area.y;
+    $('w').value = area.width;
+    $('h').value = area.height;
+  };
+  drawRectangles(rectangle => {
+    overlay.replaceChildren();
+    fill(rectangle);
+    movableBox(rectangle, () => fill(rectangle));
   });
   return () => ({ tool, x: value('x'), y: value('y'), width: value('w'), height: value('h') });
 }
@@ -178,6 +301,17 @@ function renderShapes(svg, shapes) {
       text.textContent = shape.text;
       return [text];
     }
+    if (shape.kind === 'pen') {
+      return [svgElement('polyline', { ...line, points: shape.points.map(([x, y]) => `${x},${y}`).join(' ') })];
+    }
+    if (shape.kind === 'magnifier') {
+      return [svgElement('circle', { cx: shape.x, cy: shape.y, r: shape.radius, stroke: 'white', 'stroke-width': stroke, fill: 'rgba(255,255,255,.2)' })];
+    }
+    if (shape.kind === 'picture') {
+      return [svgElement('image', {
+        href: info.urlFor(shape.path), x: shape.x, y: shape.y, width: shape.width, height: shape.width, preserveAspectRatio: 'xMinYMin meet',
+      })];
+    }
     const label = svgElement('text', {
       x: shape.x, y: shape.y + shape.size * 0.36, fill: 'white', 'font-size': shape.size, 'font-family': 'Arial', 'text-anchor': 'middle',
     });
@@ -186,7 +320,43 @@ function renderShapes(svg, shapes) {
   }));
 }
 
+/// A reorderable list of the selected files. Returns a function giving the order.
+function orderList() {
+  const order = info.names.map((_, index) => index);
+  const list = document.createElement('ol');
+  panel.append(list);
+  const move = (position, by) => {
+    const target = position + by;
+    if (target < 0 || target >= order.length) return;
+    [order[position], order[target]] = [order[target], order[position]];
+    render();
+  };
+  function render() {
+    list.replaceChildren(...order.map((file, position) => {
+      const line = document.createElement('li');
+      line.textContent = `${info.names[file]} `;
+      [['Up', -1], ['Down', 1]].forEach(([label, by]) => {
+        const button = document.createElement('button');
+        button.textContent = label;
+        button.onclick = () => move(position, by);
+        line.append(button);
+      });
+      return line;
+    }));
+  }
+  render();
+  return () => order;
+}
+
+function orderedTool() {
+  const order = orderList();
+  return () => ({ order: order() });
+}
+
 const TOOLS = {
+  'merge-pdf': orderedTool,
+  join: orderedTool,
+  'make-pdf': orderedTool,
   'crop-image'() {
     return cropPanel('crop-image');
   },
@@ -205,6 +375,7 @@ const TOOLS = {
     row(slider('brightness', 'Brightness', -100, 100, 1, 0) + slider('contrast', 'Contrast', -100, 100, 1, 0));
     row(slider('saturation', 'Saturation', -100, 100, 1, 0) + slider('hue', 'Hue', -180, 180, 1, 0));
     row(slider('sharpen', 'Sharpen', 0, 5, 0.1, 0) + slider('blurAmount', 'Blur', 0, 10, 0.1, 0) + slider('grain', 'Grain', 0, 2, 0.05, 0));
+    row(slider('dehaze', 'Dehaze', 0, 100, 1, 0) + slider('clarity', 'Clarity', 0, 100, 1, 0) + slider('denoise', 'Noise reduction', 0, 50, 1, 0));
     const preview = () => {
       // An approximation for live feedback; the saved file is made by ImageMagick.
       $('image').style.filter = `brightness(${1 + value('brightness') / 100}) contrast(${1 + value('contrast') / 100})
@@ -220,6 +391,9 @@ const TOOLS = {
       sharpen: value('sharpen'),
       blur: value('blurAmount'),
       grain: value('grain'),
+      dehaze: value('dehaze'),
+      clarity: value('clarity'),
+      denoise: value('denoise'),
     });
   },
   background() {
@@ -229,7 +403,8 @@ const TOOLS = {
          <option value="1.7778">16:9</option><option value="0.5625">9:16</option><option value="0.8">4:5</option></select></label>`);
     row(`${numberInput('padding', 'Spacing', Math.round(info.width / 10), 1)}${numberInput('radius', 'Corners', 0, 1)}
          <label><input id="shadow" type="checkbox"> Shadow</label>`);
-    row('<button id="pick">Use an image instead</button><span id="picked">Solid colour</span>');
+    row(`<button id="pick">Use an image instead</button><span id="picked">Solid colour</span>
+         ${numberInput('backdropBlur', 'Background blur', 0, 1)}`);
     $('pick').onclick = async () => {
       image = await invoke('editor_pick_image');
       $('picked').textContent = image || 'Solid colour';
@@ -238,6 +413,7 @@ const TOOLS = {
       tool: 'background-image',
       color: $('color').value,
       image,
+      backdropBlur: value('backdropBlur'),
       ratio: value('ratio'),
       padding: value('padding'),
       radius: value('radius'),
@@ -247,12 +423,20 @@ const TOOLS = {
   'redact-image'() {
     const regions = [];
     row('Draw on the image to add an area. <label><input id="blur" type="checkbox" checked> Blur (off for solid black)</label>');
-    const render = listRow(regions, area => `${area.width}x${area.height} at ${area.x},${area.y}, ${area.blur ? 'blur' : 'black'}`);
-    const add = rectangle => {
-      regions.push({ ...rectangle, blur: $('blur').checked });
+    const boxes = new Map();
+    const render = listRow(
+      regions,
+      area => `${area.width}x${area.height} at ${area.x},${area.y}, ${area.blur ? 'blur' : 'black'}`,
+      area => boxes.get(area).remove(),
+    );
+    const add = (rectangle, drawn) => {
+      if (drawn) drawn.remove();
+      const area = { ...rectangle, blur: $('blur').checked };
+      regions.push(area);
+      boxes.set(area, movableBox(area, render));
       render();
     };
-    detectRow(add, () => null);
+    detectRow(rectangle => add(rectangle), () => null);
     drawRectangles(add);
     return () => ({ tool: 'redact-image', regions });
   },
@@ -261,7 +445,9 @@ const TOOLS = {
     const size = Math.max(Math.round(info.width / 40), 12);
     row(`Tool: <select id="mark"><option value="arrow">Arrow</option><option value="box">Box</option>
          <option value="ellipse">Ellipse</option><option value="highlight">Highlight</option>
-         <option value="text">Text</option><option value="number">Numbered label</option></select>
+         <option value="pen">Draw</option><option value="text">Text</option>
+         <option value="number">Numbered label</option><option value="magnifier">Magnifier</option>
+         <option value="picture">Image</option></select>
          <label>Colour <input id="color" type="color" value="#ff0000"></label>
          <input id="words" placeholder="Text to place">
          <button id="undo">Undo</button>`);
@@ -278,11 +464,19 @@ const TOOLS = {
     };
     let draft = null;
     let nextNumber = 1;
-    overlay.onmousedown = event => {
+    overlay.onmousedown = async event => {
       const kind = $('mark').value;
       const color = $('color').value;
       const at = point(event);
-      if (kind === 'text') {
+      if (kind === 'pen') {
+        draft = { kind, color, points: [[at.x, at.y]] };
+        shapes.push(draft);
+      } else if (kind === 'magnifier') {
+        shapes.push({ kind, x: at.x, y: at.y, radius: Math.round(info.width / 8), zoom: 2.5 });
+      } else if (kind === 'picture') {
+        const path = await invoke('editor_pick_image');
+        if (path) shapes.push({ kind, x: at.x, y: at.y, width: Math.round(info.width / 4), path });
+      } else if (kind === 'text') {
         if ($('words').value) shapes.push({ kind, x: at.x, y: at.y, text: $('words').value, color, size });
       } else if (kind === 'number') {
         shapes.push({ kind, x: at.x, y: at.y, value: nextNumber, color, size });
@@ -297,8 +491,12 @@ const TOOLS = {
     overlay.onmousemove = event => {
       if (!draft) return;
       const at = point(event);
-      draft.x2 = at.x;
-      draft.y2 = at.y;
+      if (draft.kind === 'pen') {
+        draft.points.push([at.x, at.y]);
+      } else {
+        draft.x2 = at.x;
+        draft.y2 = at.y;
+      }
       renderShapes(svg, shapes);
     };
     window.onmouseup = () => { draft = null; };
@@ -378,6 +576,17 @@ const TOOLS = {
     panel.querySelectorAll('[data-lufs]').forEach(button => {
       button.onclick = () => { $('loudness').value = button.dataset.lufs; };
     });
+    row('<button id="measure">Compare levels</button><span id="levels"></span>');
+    $('measure').onclick = async () => {
+      $('levels').textContent = 'Measuring…';
+      try {
+        const levels = await invoke('editor_loudness', { loudness: value('loudness'), peak: value('peak'), range: value('range') });
+        $('levels').textContent = `Now ${levels.inputLoudness} LUFS, peak ${levels.inputPeak} dB, range ${levels.inputRange}.
+          After ${levels.outputLoudness} LUFS, peak ${levels.outputPeak} dB.`;
+      } catch (error) {
+        $('levels').textContent = String(error);
+      }
+    };
     return () => ({ tool: 'normalize', loudness: value('loudness'), peak: value('peak'), range: value('range') });
   },
   metadata() {
@@ -402,8 +611,16 @@ const TOOLS = {
          <option value="column">Column</option><option value="featured">Featured</option></select>
          ${numberInput('spacing', 'Spacing', 16, 1)}
          <label>Background <input id="color" type="color" value="#ffffff"></label>`);
-    row(info.names.join(', '));
-    return () => ({ layout: $('layout').value, spacing: value('spacing'), background: $('color').value });
+    row(`${numberInput('corners', 'Corners', 0, 1)}${numberInput('finalWidth', 'Final width, 0 to keep', 0, 1)}`);
+    const order = orderList();
+    return () => ({
+      layout: $('layout').value,
+      spacing: value('spacing'),
+      background: $('color').value,
+      corners: value('corners'),
+      width: value('finalWidth'),
+      order: order(),
+    });
   },
   'trim-video'() {
     rangeRow();
@@ -451,13 +668,20 @@ const TOOLS = {
     const areas = [];
     row(`Draw on the video to add an area. ${numberInput('start', 'From', 0)}${numberInput('end', 'To', fmt(info.duration))}
          <label><input id="blur" type="checkbox" checked> Blur (off for solid black)</label>`);
-    const render = listRow(areas, area =>
-      `${area.width}x${area.height} at ${area.x},${area.y}, ${fmt(area.start)}s to ${fmt(area.end)}s, ${area.blur ? 'blur' : 'black'}`);
-    const add = rectangle => {
-      areas.push({ ...rectangle, start: value('start'), end: value('end'), blur: $('blur').checked });
+    const boxes = new Map();
+    const render = listRow(
+      areas,
+      area => `${area.width}x${area.height} at ${area.x},${area.y}, ${fmt(area.start)}s to ${fmt(area.end)}s, ${area.blur ? 'blur' : 'black'}`,
+      area => boxes.get(area).remove(),
+    );
+    const add = (rectangle, drawn) => {
+      if (drawn) drawn.remove();
+      const area = { ...rectangle, start: value('start'), end: value('end'), blur: $('blur').checked };
+      areas.push(area);
+      boxes.set(area, movableBox(area, render));
       render();
     };
-    detectRow(add, () => player.currentTime);
+    detectRow(rectangle => add(rectangle), () => player.currentTime);
     drawRectangles(add);
     return () => ({ tool: 'redact-video', areas });
   },
@@ -465,14 +689,49 @@ const TOOLS = {
     row('<label>Left <input id="left" type="range" min="0" max="2" step="0.05" value="1"></label>');
     row('<label>Right <input id="right" type="range" min="0" max="2" step="0.05" value="1"></label>');
     row('<label><input id="mono" type="checkbox"> Mix down to mono</label>');
+    row('Hear: <button id="hearBoth">Both</button><button id="hearLeft">Left only</button><button id="hearRight">Right only</button>');
+    const hear = source => {
+      const at = player.currentTime;
+      player.src = source;
+      player.onloadedmetadata = () => { player.currentTime = at; player.play(); };
+    };
+    $('hearBoth').onclick = () => hear(info.previewUrl);
+    $('hearLeft').onclick = async () => hear(info.urlFor(await invoke('editor_solo', { right: false })));
+    $('hearRight').onclick = async () => hear(info.urlFor(await invoke('editor_solo', { right: true })));
     return () => ({ tool: 'channels', left: value('left'), right: value('right'), mono: $('mono').checked });
   },
   bleep() {
     const ranges = [];
-    rangeRow();
+    const paint = rangeRow();
     panel.append(row('<button id="addBleep">Add bleep</button>'));
-    const render = listRow(ranges, ([a, b]) => `${fmt(a)}s to ${fmt(b)}s`);
+    const render = listRow(ranges, ([a, b]) => `${fmt(a)}s to ${fmt(b)}s`, null, ([a, b]) => {
+      // Back on the timeline, where its handles can move it again.
+      $('start').value = fmt(a);
+      $('end').value = fmt(b);
+      paint();
+    });
     $('addBleep').onclick = () => { ranges.push([value('start'), value('end')]); render(); };
+    // Comparing: with the box ticked, playback mutes each range and sounds the tone.
+    panel.append(row('<label><input id="previewBleep" type="checkbox"> Hear the bleeps while playing</label>'));
+    let gain = null;
+    const follow = () => {
+      const on = $('previewBleep').checked && !player.paused
+        && ranges.some(([a, b]) => player.currentTime >= a && player.currentTime <= b);
+      player.muted = on;
+      if (gain) gain.gain.value = on ? 0.15 : 0;
+    };
+    $('previewBleep').onchange = () => {
+      if (gain || !$('previewBleep').checked) return;
+      const context = new AudioContext();
+      gain = context.createGain();
+      gain.gain.value = 0;
+      const tone = context.createOscillator();
+      tone.frequency.value = 1000;
+      tone.connect(gain).connect(context.destination);
+      tone.start();
+    };
+    // A timer, not animation frames, so it keeps running when the window is covered.
+    setInterval(follow, 30);
     return () => ({ tool: 'bleep', ranges });
   },
   visualize() {
