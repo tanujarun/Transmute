@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Transmute editor</title>
+<style>
+  body { font: 13px "Segoe UI", sans-serif; margin: 0; padding: 12px; background: #1e1e21; color: #eee; }
+  #stage { position: relative; display: inline-block; max-width: 100%; line-height: 0; background: #000; }
+  video, img { max-width: 100%; max-height: 52vh; display: block; }
+  #overlay svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #pages { display: flex; flex-wrap: wrap; gap: 8px; line-height: normal; }
+  .page { background: #2d2d32; padding: 6px; border-radius: 4px; text-align: center; }
+  .page img { max-height: 150px; margin: 0 auto 4px; }
+  .page button { margin: 1px; }
+  audio { display: none; }
+  #overlay { position: absolute; inset: 0; cursor: crosshair; display: none; }
+  .box { position: absolute; border: 2px solid #f0821e; background: rgba(240, 130, 30, .25); box-sizing: border-box; }
+  #wave { width: 100%; height: 90px; display: none; cursor: pointer; background: #111; max-height: none; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 3px 6px 3px 0; }
+  td input { width: 100%; box-sizing: border-box; }
+  #transport { margin: 8px 0; display: flex; gap: 6px; align-items: center; }
+  #scrub { flex: 1; }
+  #panel { margin-top: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+  input[type=number] { width: 84px; }
+  ul { margin: 4px 0; padding-left: 18px; }
+  #status { color: #ff9d8a; margin-top: 6px; white-space: pre-wrap; }
+  #apply { padding: 5px 16px; }
+</style>
+</head>
+<body>
+  <div id="title">Preparing preview…</div>
+  <div id="stage"><video id="video"></video><img id="image" alt=""><audio id="audio"></audio><div id="overlay"></div></div>
+  <img id="wave" alt="">
+  <div id="transport">
+    <button id="play">Play</button>
+    <button id="back">-1 frame</button>
+    <button id="forward">+1 frame</button>
+    <input id="scrub" type="range" min="0" step="0.001" value="0">
+    <span id="time">0.000</span>
+  </div>
+  <div id="panel"></div>
+  <div class="row"><button id="apply">Save new file</button></div>
+  <div id="status"></div>
+<script src="editor.js"></script>
+</body>
+</html>

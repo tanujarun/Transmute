@@ -1,0 +1,6 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "windows": ["progress", "float", "editor", "settings"],
+  "permissions": ["core:event:default", "core:window:allow-close"]
+}

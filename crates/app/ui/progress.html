@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Transmute</title>
+<style>
+  body { font: 13px "Segoe UI", sans-serif; margin: 14px; background: #1e1e21; color: #eee; user-select: none; }
+  #title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }
+  #track { height: 6px; background: #3a3a40; border-radius: 3px; overflow: hidden; }
+  #bar { height: 100%; width: 0; background: #f0821e; }
+  #bar.busy { width: 100%; opacity: .5; }
+  #errors { margin-top: 10px; color: #ff9d8a; max-height: 110px; overflow-y: auto; white-space: pre-wrap; user-select: text; }
+  button { display: none; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div id="title">Starting…</div>
+  <div id="track"><div id="bar" class="busy"></div></div>
+  <div id="errors"></div>
+  <button id="close">Close</button>
+<script>
+  const { listen } = window.__TAURI__.event;
+  const { getCurrentWindow } = window.__TAURI__.window;
+  const title = document.getElementById('title');
+  const bar = document.getElementById('bar');
+  const errors = document.getElementById('errors');
+  const close = document.getElementById('close');
+  close.onclick = () => getCurrentWindow().close();
+  const ready = [];
+  ready.push(listen('job-progress', ({ payload }) => {
+    title.textContent = payload.title;
+    bar.className = payload.fraction === null ? 'busy' : '';
+    bar.style.width = payload.fraction === null ? '' : `${payload.fraction * 100}%`;
+  }));
+  ready.push(listen('job-error', ({ payload }) => { errors.textContent += payload + '\n'; }));
+  ready.push(listen('job-note', ({ payload }) => { errors.style.color = '#eee'; errors.textContent += payload + '\n'; }));
+  ready.push(listen('job-finished', ({ payload }) => { title.textContent = payload; bar.style.width = '100%'; bar.className = ''; close.style.display = 'block'; }));
+  // Tells the app it can start sending, so no early message is lost.
+  Promise.all(ready).then(() => window.__TAURI__.event.emit('progress-ready'));
+</script>
+</body>
+</html>

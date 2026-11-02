@@ -1,0 +1,4 @@
+﻿target/
+tools/
+*.log
+crates/app/gen/

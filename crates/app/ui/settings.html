@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Transmute settings</title>
+<style>
+  body { font: 13px "Segoe UI", sans-serif; margin: 16px; background: #1e1e21; color: #eee; }
+  label { display: block; margin-bottom: 10px; }
+  select, input[type=text] { display: block; margin-top: 3px; width: 100%; box-sizing: border-box; }
+  #note { color: #aaa; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <label>Key that opens the wheel
+    <select id="triggerKey">
+      <option value="alt">Alt (either)</option>
+      <option value="rightalt">Right Alt</option>
+      <option value="ctrl">Ctrl</option>
+      <option value="shift">Shift</option>
+    </select>
+  </label>
+  <label>Terminal
+    <select id="terminalChoice">
+      <option value="auto">Windows Terminal, or PowerShell if missing</option>
+      <option value="powershell">PowerShell</option>
+      <option value="cmd">Command Prompt</option>
+      <option value="custom">Another program…</option>
+    </select>
+  </label>
+  <label id="customRow">Program path
+    <input id="customTerminal" type="text" placeholder="C:\Program Files\Alacritty\alacritty.exe">
+  </label>
+  <label><input id="revealInExplorer" type="checkbox"> Show results in Explorer</label>
+  <label><input id="revealOnDesktop" type="checkbox"> Also open Explorer for results on the Desktop</label>
+  <label><input id="startWithWindows" type="checkbox"> Start with Windows</label>
+  <label><input id="showTrayIcon" type="checkbox"> Show the tray icon</label>
+  <label><input id="soundOnFinish" type="checkbox"> Play a sound when a job finishes</label>
+  <div id="note">With the tray icon hidden, open Transmute again from its .exe to get back here.</div>
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const $ = id => document.getElementById(id);
+  const toggles = ['revealInExplorer', 'revealOnDesktop', 'startWithWindows', 'showTrayIcon', 'soundOnFinish'];
+  let settings = null;
+  const showCustom = () => { $('customRow').style.display = $('terminalChoice').value === 'custom' ? 'block' : 'none'; };
+  function save() {
+    showCustom();
+    toggles.forEach(id => { settings[id] = $(id).checked; });
+    settings.triggerKey = $('triggerKey').value;
+    const choice = $('terminalChoice').value;
+    settings.terminal = choice === 'custom' ? $('customTerminal').value : choice;
+    invoke('settings_set', { settings });
+  }
+  invoke('settings_get').then(current => {
+    settings = current;
+    toggles.forEach(id => { $(id).checked = settings[id]; });
+    $('triggerKey').value = settings.triggerKey;
+    const known = ['auto', 'powershell', 'cmd'].includes(settings.terminal);
+    $('terminalChoice').value = known ? settings.terminal : 'custom';
+    if (!known) $('customTerminal').value = settings.terminal;
+    showCustom();
+    document.querySelectorAll('input, select').forEach(element => { element.onchange = save; });
+  });
+</script>
+</body>
+</html>

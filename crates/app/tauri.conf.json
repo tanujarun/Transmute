@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Transmute",
+  "version": "0.1.0",
+  "identifier": "local.transmute.app",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": { "csp": null, "assetProtocol": { "enable": true, "scope": ["**"] } }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.ico"] }
+}

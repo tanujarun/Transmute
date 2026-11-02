@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Float</title>
+<style>
+  body { font: 13px "Segoe UI", sans-serif; margin: 8px; background: #1e1e21; color: #eee; user-select: none; }
+  .item { padding: 7px 8px; margin-bottom: 4px; background: #2d2d32; border-radius: 4px; cursor: grab;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #clear { width: 100%; margin-top: 4px; }
+</style>
+</head>
+<body>
+  <div id="items"></div>
+  <button id="left">Pin left</button>
+  <button id="right">Pin right</button>
+  <button id="clear">Clear shelf</button>
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+  const list = document.getElementById('items');
+  function show(paths) {
+    list.replaceChildren(...paths.map(path => {
+      const row = document.createElement('div');
+      row.className = 'item';
+      row.textContent = path.split('\\').pop();
+      row.title = path;
+      row.onmousedown = () => invoke('shelf_drag', { path });
+      return row;
+    }));
+  }
+  document.getElementById('clear').onclick = () => invoke('shelf_clear');
+  document.getElementById('left').onclick = () => invoke('shelf_pin', { side: 'left' });
+  document.getElementById('right').onclick = () => invoke('shelf_pin', { side: 'right' });
+  listen('shelf-changed', ({ payload }) => show(payload));
+  invoke('shelf_items').then(show);
+</script>
+</body>
+</html>
